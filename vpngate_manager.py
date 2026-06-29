@@ -1837,12 +1837,18 @@ def maintain_valid_nodes(force: bool = False) -> str:
                     n for n in current_nodes
                     if not n.get("active") and n.get("probe_status") != "unavailable"
                 ]
-                fast_candidates = apply_routing_filters(fast_candidates, ui_cfg, include_unknown_ip_type=True)
+                # 优先严格过滤（国家+IP类型），不足时才放开ip_type未知的节点
+                fast_candidates_strict = apply_routing_filters(fast_candidates, ui_cfg, include_unknown_ip_type=False)
+                if len(fast_candidates_strict) >= 3:
+                    fast_candidates = fast_candidates_strict
+                else:
+                    # 候选不足3个时，放开未知ip_type但仍严格守国家
+                    fast_candidates = apply_routing_filters(fast_candidates, ui_cfg, include_unknown_ip_type=True)
                 fast_candidates.sort(key=probe_priority_key)
                 fast_test_ids = [
                     n["id"] for n in fast_candidates
                     if n.get("id")
-                ][:INITIAL_CONNECT_TEST_LIMIT]
+                ][:max(INITIAL_CONNECT_TEST_LIMIT, 20)]
 
             if fast_test_ids:
                 initial_tested_ids = set(fast_test_ids)
@@ -1877,12 +1883,23 @@ def maintain_valid_nodes(force: bool = False) -> str:
                     is_connecting = True
 
         # Test remaining non-active nodes from the list
+        # 优先测选中国家的节点，其他国家排后面
         with lock:
             current_nodes = read_nodes()
-            to_test = [
+            ui_cfg_check = load_ui_config()
+            target_country = ui_cfg_check.get("force_country", "")
+            routing_mode = ui_cfg_check.get("routing_mode", "auto")
+            to_test_all = [
                 n for n in current_nodes
                 if not n.get("active") and n.get("id") not in initial_tested_ids
             ]
+            if routing_mode == "fixed_region" and target_country:
+                # 选中国家的节点排前面
+                to_test_priority = [n for n in to_test_all if country_matches(n.get("country"), target_country)]
+                to_test_others = [n for n in to_test_all if not country_matches(n.get("country"), target_country)]
+                to_test = to_test_priority + to_test_others
+            else:
+                to_test = to_test_all
             to_test_ids = [n["id"] for n in to_test]
             
         msg = f"开始对列表中所有候选节点进行周期连通性与延迟测试，待检测节点共 {len(to_test_ids)} 个"
@@ -3219,6 +3236,44 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </section>
 
+  <!-- 首页路由控制卡片 -->
+  <section style="margin-bottom: 20px;">
+    <div style="background: rgba(22, 30, 49, 0.6); backdrop-filter: blur(10px); border: 1px solid var(--border-color); border-radius: 16px; padding: 20px;">
+      <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+        <div class="stat-icon-wrapper" style="background: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.2); width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0;">
+          <svg xmlns="http://www.w3.org/2000/svg" class="stat-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="color: var(--success); width: 18px; height: 18px;"><path stroke-linecap="round" stroke-linejoin="round" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064" /></svg>
+        </div>
+        <div style="flex: 1;">
+          <h4 style="margin: 0; font-size: 14px; font-weight: 600; color: var(--text-primary);">路由控制</h4>
+          <p style="margin: 2px 0 0 0; font-size: 12px; color: var(--text-secondary);">快速切换出站国家与 IP 类型，立即生效并自动重连</p>
+        </div>
+        <div id="quick_routing_status" style="font-size: 12px; color: var(--text-secondary);"></div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+        <div>
+          <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; font-weight: 500;">🌏 出站国家</label>
+          <select id="quick_country" style="width: 100%; height: 40px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03); color: var(--text-primary); padding: 0 12px; font-size: 13px; cursor: pointer; outline: none;">
+            <option value="">🔄 智能路由（自动选最佳）</option>
+          </select>
+        </div>
+        <div>
+          <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; font-weight: 500;">🏠 IP 类型偏好</label>
+          <select id="quick_ip_type" style="width: 100%; height: 40px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03); color: var(--text-primary); padding: 0 12px; font-size: 13px; cursor: pointer; outline: none;">
+            <option value="all">全部节点（不限类型）</option>
+            <option value="residential">🏠 住宅 IP（推荐）</option>
+            <option value="hosting">🏢 机房 IP</option>
+          </select>
+        </div>
+      </div>
+      <div style="display: flex; gap: 10px; align-items: center; justify-content: flex-end;">
+        <span id="quick_routing_hint" style="font-size: 12px; color: var(--text-secondary); flex: 1;"></span>
+        <button id="btn_quick_routing_save" class="btn-primary" style="height: 38px; padding: 0 20px; font-weight: 600; font-size: 13px; background: var(--success-gradient); display: flex; align-items: center; gap: 6px;">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+          应用并重连
+        </button>
+      </div>
+    </div>
+  </section>
   <section class="toolbar">
     <select id="status_filter">
       <option value="all">全部节点</option>
@@ -3912,6 +3967,9 @@ function render(){
     }).join("");
   }
 
+  // 同步首页路由控制卡片状态
+  initQuickRoutingCard();
+
   // Render pagination controls
   $("page_start").textContent = shown.length > 0 ? startIndex + 1 : 0;
   $("page_end").textContent = endIndex;
@@ -4133,7 +4191,86 @@ $("country_filter").onchange=()=>{ currentPage = 1; render(); };
 $("ip_type_filter").onchange=()=>{ currentPage = 1; render(); };
 $("status_filter").onchange=()=>{ currentPage = 1; render(); };
 
-// 立即检测补齐：强制重新拉取+测活所有节点
+// ============ 首页路由控制卡片 JS ============
+function initQuickRoutingCard() {
+  // 从节点列表动态生成国家选项
+  const sel = $("quick_country");
+  if (!sel) return;
+  const countries = Array.from(new Set(
+    nodes.filter(n => n && n.country).map(n => n.country)
+  )).sort();
+  const currentVal = sel.value;
+  sel.innerHTML = '<option value="">🔄 智能路由（自动选最佳）</option>' +
+    countries.map(c => `<option value="${esc(c)}">${esc(translateCountry(c) || c)}</option>`).join('');
+  // 恢复当前选中值
+  if (state && state.force_country) sel.value = state.force_country;
+  else sel.value = '';
+
+  // 同步IP类型
+  const ipSel = $("quick_ip_type");
+  if (ipSel && state && state.routing_ip_type) {
+    ipSel.value = state.routing_ip_type;
+  }
+
+  // 更新状态提示
+  updateQuickRoutingHint();
+}
+
+function updateQuickRoutingHint() {
+  const hint = $("quick_routing_hint");
+  if (!hint) return;
+  const country = $("quick_country") ? $("quick_country").value : '';
+  const ipType = $("quick_ip_type") ? $("quick_ip_type").value : 'all';
+  const ipTypeText = {"all": "不限类型", "residential": "住宅IP", "hosting": "机房IP"}[ipType] || ipType;
+  if (country) {
+    hint.textContent = `当前：锁定 ${translateCountry(country) || country} · ${ipTypeText}`;
+  } else {
+    hint.textContent = `当前：智能路由（所有国家）· ${ipTypeText}`;
+  }
+}
+
+$("quick_country") && $("quick_country").addEventListener("change", updateQuickRoutingHint);
+$("quick_ip_type") && $("quick_ip_type").addEventListener("change", updateQuickRoutingHint);
+
+$("btn_quick_routing_save") && ($("btn_quick_routing_save").onclick = async () => {
+  const btn = $("btn_quick_routing_save");
+  const country = $("quick_country").value;
+  const ipType = $("quick_ip_type").value;
+  const routingMode = country ? "fixed_region" : "auto";
+
+  btn.disabled = true;
+  btn.innerHTML = `<svg style="animation:spin 1s linear infinite;width:14px;height:14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="10" stroke-opacity="0.2" fill="none"></circle><path d="M4 12a8 8 0 018-8" fill="none"></path></svg> 应用中...`;
+
+  try {
+    const res = await fetch("./api/update_settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        proxy_port: state.proxy_port || 7928,
+        routing_mode: routingMode,
+        force_country: country,
+        routing_ip_type: ipType
+      })
+    });
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      const statusEl = $("quick_routing_status");
+      if (statusEl) {
+        statusEl.innerHTML = `<span style="color:var(--success);">✓ 已保存，正在重连...</span>`;
+        setTimeout(() => { statusEl.innerHTML = ''; }, 3000);
+      }
+      await load();
+      updateQuickRoutingHint();
+    }
+  } catch(e) {
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" style="width:14px;height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg> 应用并重连`;
+  }
+});
+
+// ============ 立即检测补齐：强制重新拉取+测活所有节点
 $("btn_check_fill").onclick = async () => {
   const btn = $("btn_check_fill");
   btn.disabled = true;
