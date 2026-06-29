@@ -1217,13 +1217,14 @@ def normalized_country_name(country: Any) -> str:
 def country_matches(node_country: Any, target_country: Any) -> bool:
     return bool(target_country) and normalized_country_name(node_country) == normalized_country_name(target_country)
 
-def probe_priority_key(node: dict[str, Any]) -> tuple[int, int, int, int]:
+def probe_priority_key(node: dict[str, Any]) -> tuple[int, int, int, int, int]:
     ping = parse_int(node.get("ping")) or 999999
     return (
+        0 if node.get("ip_type") in ("residential", "mobile") else 1,
+        0 if node.get("quality") == "normal" else (1 if not node.get("quality") else 2),
         ping,
         -parse_int(node.get("score")),
         -parse_int(node.get("speed")),
-        parse_int(node.get("sessions")),
     )
 
 def current_fixed_node_id(ui_cfg: dict[str, Any]) -> str:
