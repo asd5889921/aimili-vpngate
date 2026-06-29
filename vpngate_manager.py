@@ -1158,6 +1158,7 @@ def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         [n for n in nodes if n.get("probe_status") == "available" or n.get("active")],
         key=lambda n: (
             0 if n.get("ip_type") in ("residential", "mobile") else 1,
+            0 if n.get("quality") == "normal" else 1,
             parse_int(n.get("latency_ms")) or 999999,
             -parse_int(n.get("score"))
         )
@@ -1194,7 +1195,10 @@ def apply_routing_filters(
     if routing_ip_type == "residential":
         candidates = [
             n for n in candidates
-            if n.get("ip_type") in ("residential", "mobile")
+            if (
+                n.get("ip_type") in ("residential", "mobile")
+                and n.get("quality") not in ("proxy", "datacenter")
+            )
             or (include_unknown_ip_type and not n.get("ip_type"))
         ]
     elif routing_ip_type == "hosting":
@@ -1544,8 +1548,14 @@ def auto_switch_node(attempt: int = 0) -> None:
             and not n.get("active")
         ]
         candidates = apply_routing_filters(candidates, ui_cfg)
-            
-        candidates.sort(key=lambda n: (parse_int(n.get("latency_ms")) or 999999, -parse_int(n.get("score"))))
+
+        # 优先选择：住宅/移动IP > 普通quality > 低延迟，代理IP垫底
+        candidates.sort(key=lambda n: (
+            0 if n.get("ip_type") in ("residential", "mobile") else 1,
+            0 if n.get("quality") == "normal" else (1 if n.get("quality") == "datacenter" else 2),
+            parse_int(n.get("latency_ms")) or 999999,
+            -parse_int(n.get("score"))
+        ))
         
     if candidates:
         next_node = candidates[0]
